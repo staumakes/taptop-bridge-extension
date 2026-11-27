@@ -35,7 +35,7 @@
   const copiesOf = renames => [...renames].map(([name, copy]) => ({ name, copy }));
 
   // decisions === null previews without applying the adopt choice (review step).
-  async function planImport({ wrapper, decisions = null, targetKey = null, receipt = null, observe, lookup }) {
+  async function planImport({ wrapper, decisions = null, targetKey = null, receipt = null, observe, lookup, takeOver = () => false, copyFor = () => false }) {
     const sync = load('TaptopClassSync');
     const conflicts = load('TaptopClassConflicts');
     const packageData = wrapper.syncPackage;
@@ -56,16 +56,31 @@
     let plan = preview();
     const byKey = () => new Map(current.syncPackage.classes.map(item => [item.stableKey, item]));
 
-    const identical = plan.plans.filter(item => item.classAction.type === 'adopt-required' && identicalToFile(item, byKey().get(item.stableKey), sync));
-    if (identical.length) {
-      receipt = sync.adopt({ preview: { ...plan, plans: identical }, packageData: current.syncPackage, receipt });
+    // A same-name class another Bridge project owns stays that project's: this
+    // package gets its own copy (`footer` → `footer-5`). Two projects in one
+    // site otherwise rewrote each other's classes (2026-11-27).
+    const copies = new Map();
+    const foreign = decisions ? plan.plans.filter(item => item.classAction.type === 'adopt-required' && copyFor(item)) : [];
+    if (foreign.length) {
+      const names = foreign.map(item => item.name);
+      let candidates = { existing: [] };
+      try { candidates = await lookup(conflicts.renameQuery(names)); } catch {}
+      const renames = conflicts.planRenames(names, candidates, conflicts.packageClassNames(current.clipboardData));
+      for (const [name, copy] of renames) copies.set(name, copy);
+      current = conflicts.applyClassRenames(current, renames);
+      observed = await observe(current.syncPackage.classes, receipt?.classBindings || []);
       plan = preview();
     }
 
-    const copies = new Map();
+    const identical = plan.plans.filter(item => item.classAction.type === 'adopt-required' && identicalToFile(item, byKey().get(item.stableKey), sync));
+    if (identical.length) {
+      receipt = sync.adopt({ preview: { ...plan, plans: identical }, packageData: current.syncPackage, receipt, takeOver });
+      plan = preview();
+    }
+
     const pending = plan.plans.filter(item => item.classAction.type === 'adopt-required');
     if (pending.length && decisions?.adopt === 'update') {
-      receipt = sync.adopt({ preview: plan, packageData: current.syncPackage, receipt });
+      receipt = sync.adopt({ preview: plan, packageData: current.syncPackage, receipt, takeOver });
       plan = preview();
     } else if (pending.length && decisions) {
       const names = pending.map(item => item.name);

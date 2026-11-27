@@ -60,12 +60,40 @@
     let receipt = null;
     try { receipt = store?.loadReceipt(identity) || null; }
     catch (error) { console.warn('[Taptop Bridge] receipt unreadable', error); }
+    // Receipts are kept per page, classes per site: this project's classes
+    // bound on other pages (its UI kit) are this package's classes too.
+    if (identity && wrapper.syncPackage?.classes?.length) {
+      try {
+        const own = new Set((receipt?.classBindings || []).map(binding => binding.stableKey));
+        const shared = globalThis.TaptopClassSync.siteProjectBindings(window.localStorage, identity, wrapper.syncPackage.classes.map(item => item.stableKey))
+          .filter(binding => !own.has(binding.stableKey));
+        if (shared.length) {
+          receipt = receipt || { schemaVersion: 1, targetKey: identity.targetKey, namespace: identity.namespace, componentKey: identity.componentKey, packageRevision: null, classBindings: [], instanceBindings: [] };
+          receipt = { ...receipt, classBindings: [...receipt.classBindings, ...shared].sort((a, b) => a.stableKey.localeCompare(b.stableKey)) };
+        }
+      } catch (error) { console.warn('[Taptop Bridge] project classes unreadable', error); }
+    }
+    // What the plan was built from; class writes re-read it and log any difference.
+    const observations = [];
+    // Same-name classes already on the site: this project's are updated,
+    // another Bridge project's get a copy for this one, and a class no
+    // project owns is brought to the file. Ownership is site-wide.
+    let owners = new Map();
+    try { owners = globalThis.TaptopClassSync.siteClassOwners(window.localStorage, identity || {}); }
+    catch (error) { console.warn('[Taptop Bridge] receipts unreadable', error); }
+    const ownersOf = item => owners.get(item.classAction?.targetClassId) || new Set();
     const plan = await globalThis.TaptopImportPlanner.planImport({
       wrapper, decisions, targetKey: identity?.targetKey || null, receipt,
-      observe: (classes, bindings) => requestRuntime('observe-classes', { classes, bindings }),
+      takeOver: item => ownersOf(item).size === 0,
+      copyFor: item => { const by = ownersOf(item); return by.size > 0 && !by.has(identity?.namespace); },
+      observe: async (classes, bindings) => {
+        const observed = await requestRuntime('observe-classes', { classes, bindings });
+        observations.push({ classes, bindings, observed });
+        return observed;
+      },
       lookup: query => requestRuntime('classes', query)
     });
-    return { ...plan, identity, store };
+    return { ...plan, identity, store, observations };
   }
 
   async function inspectFile(file) {
@@ -86,6 +114,10 @@
     try { probe = await requestRuntime('probe'); }
     catch (error) { throw codedError('EDITOR_UNAVAILABLE', error.message, true); }
     if (!probe?.ok) throw codedError('EDITOR_UNAVAILABLE', probe?.message || 'Taptop editor API is unavailable', true);
+    // Not while Taptop is saving, and not after a failed save: checked before
+    // any image is uploaded or class is written. Nothing is asked of the server.
+    try { await requestRuntime('check-save-state'); }
+    catch (error) { throw codedError(/^(EDITOR_[A-Z_]+):/.exec(error.message)?.[1] || 'EDITOR_UNAVAILABLE', error.message, true); }
     const plan = await planClasses(JSON.parse(packageText), decisions);
     if (plan.resolved?.blockers?.length) throw codedError('CLASS_SYNC_FAILED', 'Class decisions are incomplete', true);
     const pending = globalThis.TaptopImportPlanner.pendingPlans(plan.resolved);
@@ -97,19 +129,29 @@
       throw codedError('CLASS_NAME_RESPELLED', `Taptop would store class ${respelled[0].name} as ${respelled[0].stored}`, false);
     }
     let applied = [];
+    // Image uploads can take a while: the save state is checked again right
+    // before the first change to the project (class writes check it themselves).
+    let changed = false;
+    const beforeFirstChange = async () => {
+      if (changed) return;
+      await requestRuntime('check-save-state');
+      changed = true;
+    };
     const adapter = {
       async targetProjectFingerprint() { return (await requestRuntime('probe')).fingerprint; },
       async prepareAsset(asset) { return asset; }, uploadAsset: uploadEmbeddedAsset,
-      async insertLayer(clipboardData) { return requestRuntime('insert', { clipboardData }); },
+      async insertLayer(clipboardData) { await beforeFirstChange(); return requestRuntime('insert', { clipboardData }); },
       async confirmInserted(rootTagId) { return requestRuntime('confirm', { rootTagId }); },
-      async insertBehaviorLayer(clipboardData) { return requestRuntime('insert-behavior', { clipboardData }); },
+      async insertBehaviorLayer(clipboardData) { await beforeFirstChange(); return requestRuntime('insert-behavior', { clipboardData }); },
       async confirmBehaviorInserted(rootTagId) { return requestRuntime('confirm-behavior', { rootTagId }); }
     };
     // Classes are created and updated before the paste, which then links to them by name.
     if (plan.resolved) {
       adapter.syncClasses = async () => {
         if (!pending.length) return;
-        const result = await requestRuntime('apply-class-plans', { plans: pending });
+        const result = await requestRuntime('apply-class-plans', { plans: pending, observations: plan.observations });
+        changed = true;
+        if (result.drift?.length) console.warn('[Taptop Bridge] classes read differently than when the import was planned', JSON.stringify(result.drift));
         applied = result.applied || [];
         const respelled = applied.flatMap(item => item.respelled || []);
         if (respelled.length) console.info('[Taptop Bridge] Taptop stored these values in its own spelling', JSON.stringify(respelled));

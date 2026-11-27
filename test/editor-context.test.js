@@ -21,3 +21,8 @@ test('rejects a non-Taptop tab and pages without an editor shell', () => {
   assert.equal(classifyEditorContext({ hostname: 'example.com', hasEditorShell: true }).supported, false);
   assert.equal(classifyEditorContext({ hostname: 'demo.taptop.site', hasEditorShell: false }).status, 'not-editor');
 });
+
+test('accepts the editor on a connected domain by its path, not any page there', () => {
+  assert.equal(classifyEditorContext({ hostname: 'clinic.example', pathname: '/-/cms/v1/mosaic/', hasEditorShell: true }).supported, true);
+  assert.equal(classifyEditorContext({ hostname: 'clinic.example', pathname: '/about', hasEditorShell: true }).status, 'wrong-site');
+});

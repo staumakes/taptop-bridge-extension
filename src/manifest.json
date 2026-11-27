@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Taptop Bridge Extension",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Проверяет JSON-пакеты Taptop Bridge и запускает импорт из редактора.",
   "icons": {
     "16": "icons/icon-16.png",
@@ -14,12 +14,12 @@
     "scripting"
   ],
   "host_permissions": [
-    "https://*.taptop.site/-/cms/v1/mosaic/*"
+    "https://*/-/cms/v1/mosaic/*"
   ],
   "content_scripts": [
     {
       "matches": [
-        "https://*.taptop.site/-/cms/v1/mosaic/*"
+        "https://*/-/cms/v1/mosaic/*"
       ],
       "js": [
         "editor/auto-mount.js"
@@ -34,7 +34,7 @@
         "editor/import-ui.css"
       ],
       "matches": [
-        "https://*.taptop.site/*"
+        "https://*/*"
       ],
       "use_dynamic_url": true
     }

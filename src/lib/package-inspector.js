@@ -3,6 +3,7 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   root.TaptopPackageInspector = api;
 })(typeof globalThis === 'undefined' ? this : globalThis, function () {
+  const layerSafety = typeof module === 'object' && module.exports ? require('./layer-safety') : globalThis.TaptopLayerSafety;
   const SHA_256 = /^[a-f0-9]{64}$/;
   const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
   const MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml']);
@@ -63,6 +64,7 @@
       else keys.add(item.key);
       if (typeof item.adapter !== 'string' || !item.adapter) errors.push(`Behavior package ${item.key || '?'} needs an adapter`);
       const clipboard = item.clipboardData;
+      errors.push(...layerSafety.attributeErrors(clipboard));
       const rootId = clipboard?.copiedLayout?.tree?.root || clipboard?.tagID;
       const root = clipboard?.copiedLayout?.tree?.tags?.[rootId];
       if (!root || root.widgetName !== 'tt_embed') errors.push(`Behavior package ${item.key || '?'} needs a tt_embed root`);
@@ -82,6 +84,8 @@
     const packageAssets = wrapper.embeddedAssets;
     if (!Array.isArray(packageAssets)) return error('Package embeddedAssets must be an array');
     const errors = [];
+    errors.push(...layerSafety.attributeErrors(wrapper.clipboardData));
+    errors.push(...layerSafety.staleRuleErrors(wrapper.clipboardData, sync.classes));
     errors.push(...inspectBehaviorPackages(wrapper.behaviorPackages));
     const assetKeys = new Set();
     for (const item of packageAssets) {

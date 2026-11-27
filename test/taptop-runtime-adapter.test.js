@@ -290,3 +290,48 @@ test('a native write Taptop stores as 0px fails the class instead of passing as 
   const result = applyClassPlans(editor, { plans: [{ stableKey: 's/faq', name: 'faq', collection: 'main', classAction: { type: 'reuse', targetClassId: 'class_faq' }, propertyPlan: { operations: [{ type: 'set', path: JSON.stringify(['main', 'screen', '.faq', 'width']), value: { value: 'fit-content', isCustom: false } }], conflicts: [] } }] });
   assert.match(result.failures[0].message, /main screen \.faq width: Taptop stored 0px for fit-content/);
 });
+
+test('finds the layer clipboard after Taptop renumbers its modules, never the animation clipboard', () => {
+  const { findExport, resolveEditor } = require('../src/editor/taptop-runtime-adapter.js');
+  const layerClipboard = { pasteFromClipboard() {}, getClipboard() {}, clearClipboard() {} };
+  const animationClipboard = { pasteFromClipboard() {}, setAttrAnimation() {} };
+  const exportsById = { 111: { A: animationClipboard }, 222: { A: layerClipboard }, 34369: { A: { updateState() {} } }, 36945: { A: { tree: {} } } };
+  const required = [];
+  const runtimeRequire = id => { required.push(String(id)); if (!exportsById[id]) throw new Error('no module'); return exportsById[id]; };
+  runtimeRequire.m = {
+    111: function () { return 'class Animation{static pasteFromClipboard(e){}}'; },
+    222: function () { return 'class Clipboard{static pasteFromClipboard(e,t=""){}}'; },
+    333: function () { return 'unrelated'; }
+  };
+  const isLayerClipboard = value => typeof value?.pasteFromClipboard === 'function' && typeof value?.setAttrAnimation !== 'function';
+  assert.equal(findExport(runtimeRequire, [6269], isLayerClipboard, 'static pasteFromClipboard('), layerClipboard);
+  assert.ok(!required.includes('333'), 'a module that does not mention the hint is never required');
+  assert.equal(findExport(runtimeRequire, [6269], isLayerClipboard), null);
+  const chunk = { push([, , run]) { run(runtimeRequire); } };
+  const editor = resolveEditor({ rspackChunktaptop_design_editor: chunk });
+  assert.equal(editor.clipboard, layerClipboard);
+  assert.ok(editor.ok);
+});
+
+test('the pasted clipboard carries this site, so existing classes are reused, not copied as -2', () => {
+  const { sameSiteClipboard, pasteClipboardAt } = require('../src/editor/taptop-runtime-adapter.js');
+  const events = { getGlobalVar: name => ({ VER_ID: 9001, DESIGN_ID: 77 })[name], getOriginalID: id => id };
+  const source = { action: 'copy', tagID: 'root-1', copiedLayout: { tree: { root: 'root-1', tags: { 'root-1': { id: 'root-1' } } } } };
+  assert.deepEqual(sameSiteClipboard({ events }, source), { ...source, verId: 9001, designId: 77 });
+  assert.equal(source.verId, undefined, 'the package itself is not changed');
+  assert.equal(sameSiteClipboard({}, source), source, 'without the site id the clipboard stays as it was');
+
+  const stored = [];
+  const priorStorage = globalThis.localStorage;
+  globalThis.localStorage = { setItem: (key, value) => stored.push(JSON.parse(value)) };
+  try {
+    const editor = {
+      events, layout: { tree: { get: () => null } },
+      clipboardStore: { updateState() {}, setClipboard(value) { stored.push(value); } },
+      clipboard: { pasteFromClipboard: () => ({ id: 'inserted' }) }
+    };
+    assert.equal(pasteClipboardAt(editor, source, { id: 'target' }), 'inserted');
+  } finally { globalThis.localStorage = priorStorage; }
+  assert.ok(stored.length >= 2);
+  for (const item of stored) assert.equal(item.verId, 9001);
+});

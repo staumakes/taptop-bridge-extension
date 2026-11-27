@@ -7,8 +7,13 @@
     return typeof hostname === 'string' && (hostname === 'taptop.site' || hostname.endsWith('.taptop.site'));
   }
 
+  // A site's connected domain serves the same editor at this path.
+  function isEditorPath(pathname) {
+    return typeof pathname === 'string' && pathname.startsWith('/-/cms/v1/mosaic/');
+  }
+
   function classifyEditorContext(context) {
-    if (!isTaptopHost(context?.hostname)) {
+    if (!isTaptopHost(context?.hostname) && !isEditorPath(context?.pathname)) {
       return {
         supported: false,
         status: 'wrong-site',

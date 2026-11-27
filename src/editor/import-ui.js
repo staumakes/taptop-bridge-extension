@@ -43,6 +43,9 @@
   }
 
   function describeInvalidFile(fileName, message) {
+    if (/RESERVED_TAG_ATTRIBUTE/.test(message || '')) return 'в пользовательских атрибутах слоя есть запрещённый id. Пересоберите файл обновлённым Bridge.';
+    const stale = /PACKAGE_REBUILD_REQUIRED: (\S+) ([a-z-]+):/.exec(message || '');
+    if (stale) return `файл собран старой версией Bridge: Taptop не сохранит ${stale[1]} (${stale[2]}). Пересоберите файл текущей версией Bridge.`;
     if (!/\.json$/i.test(fileName || '')) return 'нужен JSON из Bridge.';
     if (/valid JSON/i.test(message || '')) return 'файл повреждён или это не JSON.';
     if (/unsupported package type/i.test(message || '')) return 'нужен JSON из Bridge.';
@@ -65,6 +68,11 @@
     if (state.errorCode === 'UPLOAD_FAILED' || state.errorCode === 'PREPARE_FAILED') {
       return total ? `Не удалось загрузить изображение ${Math.min(total, count(state.done) + 1)} из ${total}.` : 'Не удалось загрузить изображения.';
     }
+    // Save-state guards: the code is in the message even when the session
+    // reports the failing step (CLASS_SYNC_FAILED, INSERT_FAILED …).
+    const saveCode = /EDITOR_(SAVE_PENDING|SAVE_FAILED)/.exec(`${state.errorCode || ''} ${state.message || ''}`)?.[1];
+    if (saveCode === 'SAVE_PENDING') return 'Taptop ещё сохраняет страницу. Дождитесь окончания сохранения и повторите.';
+    if (saveCode === 'SAVE_FAILED') return 'Последнее сохранение в Taptop не прошло. Сохраните страницу (Cmd+S) или обновите редактор.';
     const respelled = /would store class (\S+) as (\S+)/.exec(state.message || '');
     if (respelled) return `Taptop сохранит класс .${respelled[1]} под именем .${respelled[2]}.`;
     if (state.errorCode === 'CLASS_SYNC_FAILED') {
@@ -180,7 +188,9 @@
           actions: [{ id: 'close', label: 'Понятно', variant: 'primary' }]
         };
       }
-      if (state.errorCode === 'CONFIRMATION_FAILED' || state.errorCode === 'INSERT_FAILED' || AFTER_INSERT.has(state.failedPhase)) return uncertainView(base);
+      // A save-state guard stops before the paste: nothing was added.
+      const guarded = /EDITOR_(SAVE_PENDING|SAVE_FAILED)/.test(state.message || '');
+      if (!guarded && (state.errorCode === 'CONFIRMATION_FAILED' || state.errorCode === 'INSERT_FAILED' || AFTER_INSERT.has(state.failedPhase))) return uncertainView(base);
       const retryVisible = Boolean(state.retryable);
       return {
         ...base, screen: 'result', tone: 'error', title: 'Импорт не выполнен', retryVisible,
@@ -362,14 +372,15 @@
       if (!file) return;
       const token = ++selection;
       setState({ phase: 'validating', file, fileName: file.name, fileSize: file.size, report: null, message: '', decisions: {} });
-      if (!/\.json$/i.test(file.name)) return setState({ phase: 'invalid', message: describeInvalidFile(file.name) });
+      // The raw reason is kept: the view translates it once (translating twice turned every reason into "повреждён").
+      if (!/\.json$/i.test(file.name)) return setState({ phase: 'invalid', message: '' });
       try {
         const report = await onFileSelected(file);
         if (token !== selection) return;
         if (report?.ok) setState({ phase: 'ready', report });
-        else setState({ phase: 'invalid', message: describeInvalidFile(file.name, report?.errors?.[0] || report?.message) });
+        else setState({ phase: 'invalid', message: report?.errors?.[0] || report?.message || '' });
       } catch (error) {
-        if (token === selection) setState({ phase: 'invalid', message: describeInvalidFile(file.name, error?.message) });
+        if (token === selection) setState({ phase: 'invalid', message: error?.message || '' });
       }
     }
 

@@ -190,13 +190,19 @@
 
   // Takes same-name project classes under management: their current values
   // become the baseline, so the next preview overwrites them from the file.
-  function adopt({ preview, packageData, receipt = null }) {
+  // Adopting a class that already exists binds it to the package. `takeOver`
+  // marks a class no Bridge project has bound (hand-made, or older imports):
+  // its rules the package does not have are owned too, so the merge removes
+  // them and the class ends up as in the file. Such a `footer` kept its dark
+  // background otherwise (2026-11-27). Classes of this project are only
+  // updated; classes of another project are not adopted (see the planner).
+  function adopt({ preview, packageData, receipt = null, takeOver = () => false }) {
     const bindings = new Map((receipt?.classBindings || []).map(binding => [binding.stableKey, clone(binding)]));
     const packageByKey = new Map(packageData.classes.map(item => [item.stableKey, item]));
     for (const plan of preview.plans.filter(item => item.classAction.type === 'adopt-required')) {
       const incoming = flattenRules(packageByKey.get(plan.stableKey).ownedRules || {});
       const current = flattenRules(plan.current?.rules || {});
-      const ownedPaths = Object.keys(incoming).sort();
+      const ownedPaths = [...new Set([...Object.keys(incoming), ...(takeOver(plan) ? Object.keys(current) : [])])].sort();
       const baseline = {};
       for (const path of ownedPaths) if (Object.prototype.hasOwnProperty.call(current, path)) baseline[path] = comparable(current[path]);
       bindings.set(plan.stableKey, { stableKey: plan.stableKey, targetClassId: plan.classAction.targetClassId, name: plan.name, collection: plan.collection, ownedPaths, baseline });
@@ -257,6 +263,68 @@
     return `${location.hostname}:design:${designId}:version:${versionId}`;
   }
 
+  // Which Bridge projects (namespaces) earlier imports bound each class of
+  // the site to. Receipts are kept per page (`design` in the target key), but
+  // classes belong to the whole site, so every page of the same site version
+  // counts.
+  function siteKeyOf(targetKey) {
+    const match = /^(.+):design:[^:]+:version:([^:]+)$/.exec(String(targetKey || ''));
+    return match ? `${match[1]}:version:${match[2]}` : null;
+  }
+
+  function siteClassOwners(storage, { targetKey } = {}, prefix = RECEIPT_PREFIX) {
+    const owners = new Map();
+    const site = siteKeyOf(targetKey);
+    if (!storage || !site) return owners;
+    const start = encodeURIComponent(prefix) + ':';
+    let count = 0;
+    try { count = storage.length || 0; } catch { return owners; }
+    for (let index = 0; index < count; index += 1) {
+      let key = null;
+      try { key = storage.key(index); } catch {}
+      if (typeof key !== 'string' || !key.startsWith(start)) continue;
+      try {
+        const receipt = JSON.parse(storage.getItem(key));
+        if (siteKeyOf(receipt?.targetKey) !== site || !receipt?.namespace) continue;
+        for (const binding of receipt.classBindings || []) {
+          if (!binding?.targetClassId) continue;
+          if (!owners.has(binding.targetClassId)) owners.set(binding.targetClassId, new Set());
+          owners.get(binding.targetClassId).add(receipt.namespace);
+        }
+      } catch {}
+    }
+    return owners;
+  }
+
+  // Bindings this project made on other pages of the same site, for the
+  // given stable keys. A class the UI kit import created as a copy
+  // (`btn-2`) is the same class for the page import on another page; without
+  // these the page made one more copy (`btn-3`).
+  function siteProjectBindings(storage, { targetKey, namespace } = {}, stableKeys = [], prefix = RECEIPT_PREFIX) {
+    const wanted = new Set(stableKeys);
+    const found = new Map();
+    const site = siteKeyOf(targetKey);
+    if (!storage || !site || !namespace || !wanted.size) return [];
+    const start = encodeURIComponent(prefix) + ':';
+    let count = 0;
+    try { count = storage.length || 0; } catch { return []; }
+    for (let index = 0; index < count; index += 1) {
+      let key = null;
+      try { key = storage.key(index); } catch {}
+      if (typeof key !== 'string' || !key.startsWith(start)) continue;
+      try {
+        const receipt = JSON.parse(storage.getItem(key));
+        if (receipt?.namespace !== namespace || siteKeyOf(receipt?.targetKey) !== site) continue;
+        for (const binding of receipt.classBindings || []) {
+          if (!wanted.has(binding?.stableKey) || !binding.targetClassId) continue;
+          // The same page's receipt wins over another page's.
+          if (!found.has(binding.stableKey) || receipt.targetKey === targetKey) found.set(binding.stableKey, clone(binding));
+        }
+      } catch {}
+    }
+    return [...found.values()].sort((a, b) => a.stableKey.localeCompare(b.stableKey));
+  }
+
   function createReceiptStore(storage, prefix = RECEIPT_PREFIX) {
     const keyFor = identity => [prefix, identity.targetKey, identity.namespace, identity.componentKey].map(encodeURIComponent).join(':');
     return {
@@ -276,6 +344,6 @@
 
   return {
     encodeRulePath, decodeRulePath, flattenRules, comparable, planPropertyMerge, buildClassSyncPlan,
-    previewClassSync, summarize, resolvePlans, adopt, nextReceipt, bindRoot, targetKeyFor, createReceiptStore
+    previewClassSync, summarize, resolvePlans, adopt, nextReceipt, bindRoot, targetKeyFor, createReceiptStore, siteClassOwners, siteProjectBindings
   };
 });

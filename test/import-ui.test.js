@@ -17,7 +17,7 @@ test('background owns one idempotent mount and opens the dialog from the toolbar
   const background = read('background.js');
   assert.match(background, /mount-editor-importer/);
   assert.match(background, /editor\/mount-importer\.js/);
-  assert.match(background, /taptop\.site/);
+  assert.match(background, /\/-\/cms\/v1\/mosaic\//);
   assert.match(background, /action\.onClicked/);
   assert.match(background, /setPopup/);
   assert.doesNotMatch(background, /insertCSS/);
@@ -297,4 +297,34 @@ test('a class name Taptop would respell is named, with the fix', () => {
   assert.equal(view.retryVisible, false);
   const sync = getImportView({ phase: 'failed', errorCode: 'CLASS_SYNC_FAILED', message: 'Taptop did not apply class col-1: Taptop would store class col-1 as col', retryable: true, failedPhase: 'syncing-classes' });
   assert.equal(sync.lines[0], 'Taptop сохранит класс .col-1 под именем .col.');
+});
+
+test('a save-state guard says what to do and that nothing was added', () => {
+  for (const [errorCode, failedPhase, message, text] of [
+    ['EDITOR_SAVE_PENDING', 'preparing', 'EDITOR_SAVE_PENDING: Taptop is saving the page', /ещё сохраняет/],
+    ['EDITOR_SAVE_FAILED', 'preparing', 'EDITOR_SAVE_FAILED: The last Taptop save failed', /не прошло.*Cmd\+S/],
+    ['INSERT_FAILED', 'inserting', 'EDITOR_SAVE_FAILED: The last Taptop save failed', /не прошло/],
+    ['CLASS_SYNC_FAILED', 'syncing-classes', 'EDITOR_SAVE_PENDING: Taptop is saving the page', /ещё сохраняет/]
+  ]) {
+    const view = getImportView({ phase: 'failed', errorCode, retryable: true, failedPhase, message });
+    assert.equal(view.title, 'Импорт не выполнен');
+    assert.match(view.lines[0], text);
+    assert.equal(view.lines[1], 'На страницу ничего не добавлено.');
+  }
+});
+
+test('an older package is described in plain words with the class and the property', () => {
+  const text = describeInvalidFile('page.json', 'PACKAGE_REBUILD_REQUIRED: .hero-strip border-radius: 20px 20px 0 0 is a native rule Taptop will not keep; rebuild the package with current Bridge');
+  assert.equal(text, 'файл собран старой версией Bridge: Taptop не сохранит .hero-strip (border-radius). Пересоберите файл текущей версией Bridge.');
+});
+
+test('the dialog shows the specific reason a file was refused, translated once', () => {
+  for (const [raw, reason] of [
+    ['PACKAGE_REBUILD_REQUIRED: .hero-strip border-radius: 20px 20px 0 0 is a native rule Taptop will not keep', /старой версией Bridge.*\.hero-strip \(border-radius\)/],
+    ['RESERVED_TAG_ATTRIBUTE: tag x attr.id must not override', /запрещённый id/],
+    ['Package must be valid JSON', /не JSON/]
+  ]) {
+    assert.match(getImportView({ phase: 'invalid', fileName: 'page.json', message: raw }).dropzone.reason, reason);
+  }
+  assert.equal(getImportView({ phase: 'invalid', fileName: 'page.txt', message: '' }).dropzone.reason, 'нужен JSON из Bridge.');
 });

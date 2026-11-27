@@ -3,6 +3,7 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   root.TaptopRuntimeAdapter = api;
 })(typeof globalThis === 'undefined' ? this : globalThis, function () {
+  const layerSafety = typeof module === 'object' && module.exports ? require('../lib/layer-safety') : globalThis.TaptopLayerSafety;
   const CLIPBOARD_STORAGE_KEY = 'clipboardData';
 
   function objectCandidates(value) {
@@ -36,7 +37,11 @@
     return null;
   }
 
-  function findExport(require, moduleIds, predicate) {
+  // Module ids change when Taptop rebuilds its editor (the layer clipboard
+  // moved from 6269/13339 to 48511 by 2026-11-26). The rspack runtime exposes
+  // no module cache, so after the known ids the search reads the module
+  // sources for `sourceHint` and tries only the modules that mention it.
+  function findExport(require, moduleIds, predicate, sourceHint = '') {
     if (typeof require !== 'function') return null;
     for (const id of moduleIds) {
       try {
@@ -48,14 +53,28 @@
         for (const candidate of objectCandidates(cached?.exports)) if (predicate(candidate)) return candidate;
       }
     } catch {}
+    if (!sourceHint) return null;
+    let definitions = {};
+    try { definitions = require.m || {}; } catch {}
+    for (const id of Object.keys(definitions)) {
+      if (moduleIds.includes(Number(id)) || moduleIds.includes(id)) continue;
+      try {
+        if (!String(definitions[id]).includes(sourceHint)) continue;
+        for (const candidate of objectCandidates(require(id))) if (predicate(candidate)) return candidate;
+      } catch {}
+    }
     return null;
   }
+
+  // The layer clipboard; the animation clipboard has a one-argument
+  // pasteFromClipboard too and must not be taken for it.
+  const isLayerClipboard = value => typeof value?.pasteFromClipboard === 'function' && typeof value?.setAttrAnimation !== 'function';
 
   function resolveEditor(scope = globalThis) {
     const require = captureRuntimeRequire(scope);
     let resolved = null;
     try { resolved = scope.__ttEnhancerResolveRuntimeApi?.(require) || null; } catch {}
-    const clipboard = resolved?.clipboard || findExport(require, [6269, 13339], value => typeof value?.pasteFromClipboard === 'function');
+    const clipboard = resolved?.clipboard || findExport(require, [48511, 6269, 13339], isLayerClipboard, 'static pasteFromClipboard(');
     const clipboardStore = resolved?.clipboardStore || findExport(require, [34369], value => typeof value?.updateState === 'function');
     const layout = resolved?.layout || findExport(require, [36945], value => value?.tree && typeof value.tree === 'object');
     const widgets = resolved?.widgets || findExport(require, [71842], value => typeof value?.get === 'function');
@@ -65,12 +84,14 @@
     if (!constants) try { constants = require(89224); } catch {}
     let history = resolved?.history || null;
     if (!history) try { history = require(16271)?.A || null; } catch {}
+    // Editor state store (save state); module id checked against the live editor on 2026-11-26.
+    const state = resolved?.state || findExport(require, [87621], value => typeof value?.setSavingState === 'function');
     const missing = [
       !clipboard && 'clipboard',
       !clipboardStore && 'clipboard state',
       !layout && 'layout'
     ].filter(Boolean);
-    return { ok: missing.length === 0, missing, clipboard, clipboardStore, layout, widgets, constants, events, layers, history };
+    return { ok: missing.length === 0, missing, clipboard, clipboardStore, layout, widgets, constants, events, layers, history, state };
   }
 
   function rootIdFor(layout) {
@@ -215,10 +236,30 @@
     }
   }
 
+  // Taptop's own copy marks the clipboard with the site it came from
+  // (verId/designId). A paste whose verId is not this site's is a paste from
+  // another site: every class whose name already exists becomes a copy
+  // (`type-hero` → `type-hero-2`), and the copy's custom line-height is
+  // rebuilt as 0px (live 2026-11-27, 1113 such copies on a test site). With
+  // this site's verId the paste reuses the classes the class sync has just
+  // written, as a copy inside the site does.
+  function sameSiteClipboard(editor, clipboardData) {
+    let verId = null;
+    let designId = null;
+    try {
+      verId = editor?.events?.getGlobalVar?.('VER_ID') ?? null;
+      designId = editor?.events?.getGlobalVar?.('DESIGN_ID') ?? null;
+    } catch {}
+    if (verId === null || verId === undefined || verId === '') return clipboardData;
+    return { ...clipboardData, verId, designId };
+  }
+
   function pasteClipboardAt(editor, clipboardData, targetTag) {
+    layerSafety.assertSafe(clipboardData);
     if (!targetTag?.id) throw new Error('Taptop paste target was not found');
     const clipboardRootId = clipboardData?.tagID || clipboardData?.copiedLayout?.tree?.root;
     if (typeof clipboardRootId !== 'string' || !clipboardRootId) throw new Error('Imported JSON has no root layer');
+    clipboardData = sameSiteClipboard(editor, clipboardData);
     const serialized = JSON.stringify(clipboardData);
     globalThis.localStorage.setItem(CLIPBOARD_STORAGE_KEY, serialized);
     editor.clipboardStore.updateState?.();
@@ -302,12 +343,28 @@
     if (!sync || !layout) throw new Error('Class synchronization is unavailable');
     const boundByKey = new Map(bindings.map(binding => [binding.stableKey, binding]));
     const observed = {};
+    // Every rule of the class's own selectors (`.name`, `.name:hover` …) per
+    // channel, so an existing class with the same name is seen whole.
+    const ownSelectorPaths = new Map();
+    const pathsOfClass = (channel, name) => {
+      const key = `${channel}\u0000${name}`;
+      if (ownSelectorPaths.has(key)) return ownSelectorPaths.get(key);
+      const found = [];
+      for (const selector of valuesOf(layout[`${channel}SelectorCollection`]?.map)) {
+        const text = selector?.selectorText;
+        if (text !== `.${name}` && !(typeof text === 'string' && text.startsWith(`.${name}:`))) continue;
+        for (const [property] of entriesOf(selector.rules)) found.push(sync.encodeRulePath(channel, selector.media, text, property));
+      }
+      ownSelectorPaths.set(key, found);
+      return found;
+    };
     for (const packageClass of classes) {
       const binding = boundByKey.get(packageClass.stableKey) || null;
       const collection = layout[`${packageClass.collection}ClassNameCollection`];
       const target = binding ? collection?.get?.(binding.targetClassId) : collection?.findByName?.(packageClass.name);
       if (!target) { observed[packageClass.stableKey] = null; continue; }
-      const paths = [...new Set([...(binding?.ownedPaths || []), ...Object.keys(sync.flattenRules(packageClass.ownedRules || {}))])].sort();
+      const existing = binding ? [] : pathsOfClass(packageClass.collection, packageClass.name);
+      const paths = [...new Set([...(binding?.ownedPaths || []), ...Object.keys(sync.flattenRules(packageClass.ownedRules || {})), ...existing])].sort();
       const rules = {};
       for (const path of paths) {
         const { channel, media, selectorText, property } = sync.decodeRulePath(path);
@@ -413,6 +470,59 @@
     return { applied, failures };
   }
 
+  // ---------- save state ----------
+  // Taptop saves the whole selector collection with the version the tab
+  // loaded; a tab older than the server gets the save conflict. The importer
+  // never saves and never sends a version: the user's save or the autosave
+  // does. Asking the server for the collection before an import was dropped
+  // at the Taptop developers' request (2026-11-27); what stays is a local
+  // check they approved: wait while a save runs, refuse after a failed save.
+  function saveError(code, message) {
+    const error = new Error(`${code}: ${message}`);
+    error.code = code;
+    return error;
+  }
+
+  // The editor's own save state, read only. An editor whose state store
+  // cannot be found is not refused: the next Taptop build may move it.
+  function saveState(editor) {
+    const state = editor?.state;
+    const states = editor?.constants?.y5;
+    if (!state || !states || typeof state.savingState !== 'string') return { known: false };
+    return { known: true, saving: state.savingState === states.SAVING, failed: state.savingState === states.ERROR, loading: state.isEditorStateReady === false };
+  }
+
+  const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  async function checkSaveState(editor, { waitMs = 15000, pollMs = 250, sleep = delay } = {}) {
+    for (let waited = 0; saveState(editor).saving && waited < waitMs; waited += pollMs) await sleep(pollMs);
+    const current = saveState(editor);
+    if (!current.known) return current;
+    if (current.loading) throw saveError('EDITOR_SAVE_PENDING', 'Taptop editor is still loading');
+    if (current.saving) throw saveError('EDITOR_SAVE_PENDING', 'Taptop is saving the page');
+    if (current.failed) throw saveError('EDITOR_SAVE_FAILED', 'The last Taptop save failed');
+    return current;
+  }
+
+  // Applies the class plans after the save-state check. Classes that read
+  // differently than when the plan was made are reported in `drift` for
+  // diagnostics, not refused: a hard stop on that check stopped a real import
+  // on 2026-11-26 although nothing had been edited.
+  async function applyClassPlansChecked(editor, { plans = [], observations = [] } = {}, options) {
+    await checkSaveState(editor, options);
+    const drift = [];
+    for (const { classes, bindings, observed } of observations) {
+      const current = observeClasses(editor, { classes, bindings });
+      for (const key of new Set([...Object.keys(current), ...Object.keys(observed || {})])) {
+        const planned = JSON.stringify(observed?.[key] ?? null);
+        const now = JSON.stringify(current[key] ?? null);
+        if (planned !== now) drift.push({ stableKey: key, planned: planned.slice(0, 300), now: now.slice(0, 300) });
+      }
+    }
+    const result = applyClassPlans(editor, { plans });
+    return drift.length ? { ...result, drift } : result;
+  }
+
   function installBridge() {
     const stateKey = '__taptopBridgeRuntimeBridge';
     try { root[stateKey]?.destroy?.(); } catch {}
@@ -447,5 +557,5 @@
     return true;
   }
 
-  return { captureRuntimeRequire, findExport, resolveEditor, rootIdFor, pastedRootId, findScriptsLayer, originalIdFor, appendMarkerFor, originalTagFor, emitLayoutChanged, ensureScriptsLayer, pasteClipboardAt, probe, insert, insertBehavior, confirm, projectClasses, classes, observeClasses, applyClassPlans, respelledClassNames, installBridge };
+  return { captureRuntimeRequire, findExport, resolveEditor, rootIdFor, pastedRootId, findScriptsLayer, originalIdFor, appendMarkerFor, originalTagFor, emitLayoutChanged, ensureScriptsLayer, pasteClipboardAt, sameSiteClipboard, probe, insert, insertBehavior, confirm, projectClasses, classes, observeClasses, applyClassPlans, respelledClassNames, saveState, checkSaveState, applyClassPlansChecked, installBridge };
 });

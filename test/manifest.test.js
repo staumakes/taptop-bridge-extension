@@ -5,14 +5,16 @@ const test = require('node:test');
 
 const manifestPath = path.join(__dirname, '..', 'src', 'manifest.json');
 
-test('automatically mounts only in the narrow Taptop editor URL', () => {
+test('automatically mounts only on the Taptop editor path, on any domain', () => {
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 
   assert.equal(manifest.manifest_version, 3);
   assert.equal(manifest.action.default_popup, 'popup/popup.html');
-  assert.deepEqual(manifest.host_permissions, ['https://*.taptop.site/-/cms/v1/mosaic/*']);
+  // Taptop subdomains and a site's connected domain serve the editor at this path.
+  assert.deepEqual(manifest.host_permissions, ['https://*/-/cms/v1/mosaic/*']);
+  assert.equal(manifest.optional_host_permissions, undefined);
   assert.deepEqual(manifest.content_scripts, [{
-    matches: ['https://*.taptop.site/-/cms/v1/mosaic/*'],
+    matches: ['https://*/-/cms/v1/mosaic/*'],
     js: ['editor/auto-mount.js'],
     run_at: 'document_idle'
   }]);
@@ -22,11 +24,11 @@ test('automatically mounts only in the narrow Taptop editor URL', () => {
   assert.equal(fs.existsSync(path.join(__dirname, '../src/editor/auto-mount.js')), true);
 });
 
-test('exposes only the font and dialog sheet to Taptop editor pages', () => {
+test('exposes only the font and dialog sheet, also to editors on connected domains', () => {
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   assert.deepEqual(manifest.web_accessible_resources, [{
     resources: ['fonts/InterVariable.woff2', 'editor/import-ui.css'],
-    matches: ['https://*.taptop.site/*'],
+    matches: ['https://*/*'],
     use_dynamic_url: true
   }]);
 });
